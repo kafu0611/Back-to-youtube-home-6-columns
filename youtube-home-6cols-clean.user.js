@@ -1,6 +1,7 @@
 // ==UserScript==
 // @name         Back-to-youtube-home-6-columns
 // @namespace    yt-home-6cols-clean
+// @version      0.2
 // @match        https://www.youtube.com/*
 // @run-at       document-start
 // @grant        GM_addStyle
@@ -13,8 +14,8 @@
 
   const STYLE_ID = 'yt-home-6cols-clean-style';
 
-  // 只在主页生效
-  const isHome = () => location.pathname === '/' || location.pathname === '/feed';
+  // 只在主页生效（YouTube 主页路径仅为 '/'）
+  const isHome = () => location.pathname === '/';
 
   // 注入 CSS（只改变量，不改 display）
   const injectStyle = () => {
@@ -32,12 +33,11 @@ ytd-rich-item-renderer {
   zoom: 1 !important;
 }
 
-/* 可选：把“强调/超大卡片”恢复为普通卡（避免一行只剩它一个） */
+/* 可选：把”强调/超大卡片”恢复为普通卡（避免一行只剩它一个） */
 ${ENABLE_UNIFORM_EMPHASIS ? `
 ytd-rich-item-renderer[is-emphasized],
 ytd-rich-item-renderer[lockup] {
-  /* 不去改 display，只移除会导致它变宽的样式特征 */
-  contain: content; /* 限制内部自适应带来的外扩 */
+  contain: content;
 }
 ` : ''}
 
@@ -69,10 +69,20 @@ ytd-rich-section-renderer:has(#rich-shelf-header-container) {
   ];
 
   const markShelvesByText = (root = document) => {
-    // “重大新闻” 类分区
+    // “重大新闻” 类分区：用多个候选选择器兜底，应对 YouTube 结构变更
     root.querySelectorAll('ytd-rich-section-renderer').forEach(sec => {
-      const title = sec.querySelector('#title')?.textContent?.trim() ||
-                    sec.querySelector('#rich-shelf-header')?.textContent?.trim() || '';
+      const titleSelectors = [
+        '#title', '#rich-shelf-header', '#shelf-title',
+        'h2', 'yt-formatted-string', 'span#title'
+      ];
+      let title = '';
+      for (const sel of titleSelectors) {
+        const el = sec.querySelector(sel);
+        if (el?.textContent?.trim()) {
+          title = el.textContent.trim();
+          break;
+        }
+      }
       if (title && labelsTopNews.some(t => title.includes(t))) {
         sec.setAttribute('data-ytg-hide', '1');
       }
@@ -112,8 +122,9 @@ ytd-rich-section-renderer:has(#rich-shelf-header-container) {
     }
   });
 
-  // 入口
+  // 入口（每次导航前先断开旧的观察，避免重复注册）
   const boot = () => {
+    mo.disconnect();
     applyOnce();
     mo.observe(document.documentElement, { childList: true, subtree: true });
   };
