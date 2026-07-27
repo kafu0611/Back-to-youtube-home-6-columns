@@ -36,6 +36,10 @@
   let cacheLoaded = false;
   let cacheSaveTimer = 0;
   let innertubeConfig = null;
+  let innertubeConfigChecked = false;
+  let playerApiFailures = 0;
+  // player 接口连续失败这么多次后就不再尝试，避免每个视频都白发一次请求再走兜底
+  const PLAYER_API_FAILURE_LIMIT = 3;
 
   // 只在主页生效（YouTube 主页路径仅为 '/'）
   const isHome = () => location.pathname === '/';
@@ -270,9 +274,12 @@ ${HIDE_ALL_SECTIONS ? `
 
   // ---- 抓取：优先用 player 接口，失败再退回观看页 HTML ----
 
-  // 从页面自身的 ytcfg 内联脚本里读出 innertube 参数
+  // 从页面自身的 ytcfg 内联脚本里读出 innertube 参数。
+  // 结果（包括“没找到”）只算一次：YouTube 的内联脚本里有 ytInitialData 这种 MB 级
+  // 字符串，每个视频都重扫一遍 document.scripts 的开销并不小。
   const readInnertubeConfig = () => {
-    if (innertubeConfig) return innertubeConfig;
+    if (innertubeConfigChecked) return innertubeConfig;
+    innertubeConfigChecked = true;
     for (const script of document.scripts) {
       const text = script.textContent;
       if (!text || !text.includes('INNERTUBE_API_KEY')) continue;
@@ -287,29 +294,40 @@ ${HIDE_ALL_SECTIONS ? `
     return null;
   };
 
-  // 返回日期字符串；返回 null 表示这条通道用不了，交给观看页兜底
+  // 返回日期字符串；返回 null 表示这条通道用不了，交给观看页兜底。本函数不抛错。
   const fetchViaPlayerApi = async videoId => {
+    if (playerApiFailures >= PLAYER_API_FAILURE_LIMIT) return null;
     const config = readInnertubeConfig();
     if (!config) return null;
 
-    const response = await fetch(
-      `/youtubei/v1/player?key=${encodeURIComponent(config.key)}&prettyPrint=false`,
-      {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          videoId,
-          context: {
-            client: { clientName: config.clientName, clientVersion: config.clientVersion }
-          }
-        })
+    try {
+      const response = await fetch(
+        `/youtubei/v1/player?key=${encodeURIComponent(config.key)}&prettyPrint=false`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            videoId,
+            context: {
+              client: { clientName: config.clientName, clientVersion: config.clientVersion }
+            }
+          })
+        }
+      );
+      if (!response.ok) {
+        playerApiFailures += 1;
+        return null;
       }
-    );
-    if (!response.ok) return null;
 
-    const micro = (await response.json())?.microformat?.playerMicroformatRenderer;
-    return normalizeDate(micro?.publishDate || micro?.uploadDate) || null;
+      const micro = (await response.json())?.microformat?.playerMicroformatRenderer;
+      // 接口本身是通的，计数归零；个别视频没有 microformat 属于正常情况
+      playerApiFailures = 0;
+      return normalizeDate(micro?.publishDate || micro?.uploadDate) || null;
+    } catch {
+      playerApiFailures += 1;
+      return null;
+    }
   };
 
   const fetchViaWatchPage = async videoId => {
@@ -321,15 +339,10 @@ ${HIDE_ALL_SECTIONS ? `
   };
 
   // 解析成功但确实没有日期时返回空串（确定性结果，会被缓存）；
-  // 网络/HTTP 故障则抛出（临时性结果，不缓存，下次卡片再进视口时重试）
+  // 网络/HTTP 故障则抛出（临时性结果，不写缓存，下次遇到这个视频时重新请求）
   const requestPublishDate = async videoId => {
-    try {
-      const date = await fetchViaPlayerApi(videoId);
-      if (date) return date;
-    } catch {
-      // player 接口不可用（结构变更、被拦截等）时退回观看页 HTML
-    }
-    return fetchViaWatchPage(videoId);
+    const date = await fetchViaPlayerApi(videoId);
+    return date || fetchViaWatchPage(videoId);
   };
 
   const fetchPublishDate = videoId => {
@@ -398,6 +411,8 @@ ${HIDE_ALL_SECTIONS ? `
       activeDateFetches += 1;
       fetchPublishDate(videoId)
         .then(exactDate => replacePublishDate(card, videoId, exactDate))
+        // 请求失败的卡片本次浏览不再重试（否则它还在视口里，会立刻触发重试循环）。
+        // 但失败结果没有进缓存，所以刷新页面、换标签页或卡片被复用后仍会重新请求。
         .catch(() => markUnavailable(card, videoId))
         .finally(() => {
           activeDateFetches -= 1;

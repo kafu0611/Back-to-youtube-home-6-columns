@@ -22,8 +22,8 @@ page is only fetched as a fallback when that endpoint is unavailable. Lookups ar
 limited to cards near the viewport, capped at 3 concurrent requests, and cached in
 `localStorage` — publish dates never change, so a video is fetched at most once
 across tabs and sessions. Videos that genuinely have no publish date are recorded
-too, so they are not retried on every scroll, while transient network failures are
-left uncached and retried later.
+too, so they are not retried on every scroll. Transient network failures are left
+uncached, so those videos are requested again on a reload or in another tab.
 
 Cards that are not ordinary videos — live streams, premieres, and Mix/playlist
 cards — are detected by their metadata text and left untouched.
