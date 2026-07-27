@@ -11,3 +11,9 @@ Hide Shorts Module: Automatically removes the Shorts recommendation shelves from
 Remove Distracting Shelves: Automatically hides inserted category shelves such as "Recommended by topic" and "Breaking news".
 
 Dynamic SPA Adaptation: Fully compatible with YouTube's Single Page Application (SPA) mechanics; newly loaded content upon scrolling will automatically inherit these rules.
+
+Exact Publish Dates: Replaces relative timestamps such as "2 years ago" with
+the video's exact publish date in `YYYY-MM-DD` format. Dates are loaded only for
+cards near the viewport, with limited concurrency and session caching to avoid
+unnecessary repeated requests. Live cards without a normal publish-date field
+are left unchanged.
