@@ -77,9 +77,11 @@ ${ENABLE_UNIFORM_EMPHASIS ? `
   };
 
   // 按相对时间文本找元素，不依赖它在元数据行中的位置。
-  const isRelativeTime = text =>
-    /(?:\bago|前|\s전|назад|geleden|siden|sedan|önce|trước|yang lalu|fa)$/i
-      .test(text?.replace(/\u00a0/g, ' ').trim() || '');
+  const isRelativeTime = text => {
+    const value = text?.replace(/\u00a0/g, ' ').trim() || '';
+    return /\d[\s\S]*(?:\bago|前|\s전|назад|geleden|siden|sedan|önce|trước|yang lalu|fa)$/i.test(value) ||
+      /^(?:just now|刚刚|剛剛)$/i.test(value);
+  };
 
   const findDateElement = card => Array.from(card.querySelectorAll(
     'yt-content-metadata-view-model span[role="text"], ' +
