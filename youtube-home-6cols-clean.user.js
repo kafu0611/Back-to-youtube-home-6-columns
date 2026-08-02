@@ -18,6 +18,7 @@
   const HOME = 'data-ytg-home';      // <html> 上的开关，CSS 只在主页生效
   const DONE = 'data-ytg-video';     // 卡片上记录已处理过的 videoId
   const KEEP = 'data-ytg-relative';  // 日期元素上保存原始的相对时间
+  const SHOW = 'data-ytg-shown';     // 日期元素上保存我们写进去的日期
 
   const isHome = () => location.pathname === '/';
 
@@ -90,9 +91,17 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     return cache.get(id);
   };
 
+  // 卡片上我们写的日期是否还原封不动地显示着。YouTube 可能在 videoId 不变的
+  // 情况下重建日期节点，或者把它就地改成“正在直播”这类状态文字。
+  const isShown = card => {
+    const el = card.querySelector(`[${KEEP}]`);
+    return !!el && el.textContent.trim() === el.getAttribute(SHOW);
+  };
+
   const showDate = async card => {
     const id = videoIdOf(card);
-    if ((card.getAttribute(DONE) || '') === id) return; // 还是同一个视频
+    // 视频没变，而且日期还在原地显示（Mix、播放列表这类没有 id 的只看标记）。
+    if ((card.getAttribute(DONE) || '') === id && (!id || isShown(card))) return;
 
     // 卡片换了内容就先把旧记录全部作废，包括换成 Mix、直播这类不处理的卡片：
     // 留着旧标记会让这张卡以后再显示同一个视频时被当成已处理，
@@ -111,6 +120,7 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
 
     const relative = el.textContent.trim();
     el.setAttribute(KEEP, relative);
+    el.setAttribute(SHOW, date);
     el.setAttribute('title', relative);
     el.setAttribute('aria-label', date);
     el.textContent = date;
@@ -120,14 +130,18 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
   const clearDates = (root, restore) => {
     root.querySelectorAll(`[${KEEP}]`).forEach(el => {
       const card = el.closest(CARD);
-      // 卡片已经换了视频时，YouTube 写的新文字才是对的，不能拿旧记录覆盖。
-      if (restore && card?.getAttribute(DONE) === videoIdOf(card)) {
+      // 只有确认这段文字仍是我们为当前视频写进去的日期，才把相对时间还原回去。
+      // 卡片换了视频、或者 YouTube 已经改写过这里，都以它写的新文字为准。
+      const ours = card?.getAttribute(DONE) === videoIdOf(card) &&
+        el.textContent.trim() === el.getAttribute(SHOW);
+      if (restore && ours) {
         const relative = el.getAttribute(KEEP);
         el.textContent = relative;
         el.setAttribute('aria-label', relative);
       }
       el.removeAttribute('title');
       el.removeAttribute(KEEP);
+      el.removeAttribute(SHOW);
     });
     root.querySelectorAll(`[${DONE}]`).forEach(card => card.removeAttribute(DONE));
   };
