@@ -46,7 +46,8 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
 
   // ---- 精确发布日期 ----
 
-  const cache = new Map(); // videoId -> Promise<string>，同一次浏览只请求一次
+  const cache = new Map();   // videoId -> Promise<string>，同一次浏览只请求一次
+  const results = new Map(); // videoId -> string，已返回的结果（空串表示这次取不到）
 
   // 卡片内第一个 /watch 链接就是这张卡的视频；Mix/播放列表带 list 参数，跳过。
   const videoIdOf = card => {
@@ -68,6 +69,7 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
   )].find(el => looksRelative(el.textContent) || looksRelative(el.getAttribute('aria-label')));
 
   // 复用页面自带的 Innertube 接口，不需要 API key，也不下载完整观看页。
+  // 结果同时记进 results，好让别处不必等 Promise 就知道请求有没有结束。
   const fetchDate = id => {
     if (!cache.has(id)) cache.set(id, (async () => {
       try {
@@ -87,7 +89,10 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
       } catch {
         return '';
       }
-    })());
+    })().then(date => {
+      results.set(id, date);
+      return date;
+    }));
     return cache.get(id);
   };
 
@@ -98,16 +103,29 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     return !!el && el.textContent.trim() === el.getAttribute(SHOW);
   };
 
+  // 这张卡片已经处理到位，既不用登记也不用再处理。
+  const isSettled = (card, id) => {
+    if ((card.getAttribute(DONE) || '') !== id) return false; // 换视频了
+    if (!id) return true;                                     // Mix、播放列表
+
+    const date = results.get(id);
+    if (date === undefined) return true; // 请求还没回来，等它自己写回，别重复排队
+    if (!date) return true;              // 这次浏览取不到日期，不重试
+    return isShown(card);                // 日期还在原地就不用重做
+  };
+
   const showDate = async card => {
     const id = videoIdOf(card);
-    // 视频没变，而且日期还在原地显示（Mix、播放列表这类没有 id 的只看标记）。
-    if ((card.getAttribute(DONE) || '') === id && (!id || isShown(card))) return;
+    if (isSettled(card, id)) return;
 
     // 卡片换了内容就先把旧记录全部作废，包括换成 Mix、直播这类不处理的卡片：
     // 留着旧标记会让这张卡以后再显示同一个视频时被当成已处理，
     // 留着旧的还原信息则会在离开主页时覆盖新视频的文字。
-    card.removeAttribute(DONE); // querySelectorAll 不含 root 自身，得单独删
-    clearDates(card, false);
+    // KEEP/SHOW 只会和 DONE 一起写入、一起清除，所以没有 DONE 就没有东西要清。
+    if (card.hasAttribute(DONE)) {
+      card.removeAttribute(DONE); // querySelectorAll 不含 root 自身，得单独删
+      clearDates(card, false);
+    }
     if (!id || !dateElOf(card)) return;
 
     card.setAttribute(DONE, id); // 先标记，避免重复请求同一张卡
@@ -166,13 +184,17 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     const cards = new Set();
     for (const root of roots) {
       if (!root.isConnected) continue; // 同一帧内又被移除的子树不必登记
-      const self = root.closest?.(CARD); // root 本身可能就在某张卡片里
+
+      // root 本身就在某张卡片里的话，它下面不可能再有别的卡片，不用往下找。
+      const self = root.closest?.(CARD);
       if (self) cards.add(self);
-      root.querySelectorAll(CARD).forEach(card => cards.add(card));
+      else root.querySelectorAll(CARD).forEach(card => cards.add(card));
     }
     cards.forEach(card => {
       // rich-section 已被隐藏，不为其中的货架视频请求日期。
-      if (!card.closest('ytd-rich-section-renderer')) cardsInView.observe(card);
+      if (card.closest('ytd-rich-section-renderer')) return;
+      // 已经处理到位的卡片不必再进观察队列，否则它每变化一次都要空跑一轮。
+      if (!isSettled(card, videoIdOf(card))) cardsInView.observe(card);
     });
   };
 
