@@ -1,137 +1,225 @@
 // ==UserScript==
 // @name         Back-to-youtube-home-6-columns
 // @namespace    yt-home-6cols-clean
-// @version      0.2
+// @version      0.4
+// @description  固定 YouTube 主页六列、隐藏插入分区，并显示视频的精确发布日期
 // @match        https://www.youtube.com/*
 // @run-at       document-start
-// @grant        GM_addStyle
+// @grant        none
 // ==/UserScript==
 
 (() => {
   // 配置
-  const COLS = 6;                 // 主页每行视频个数
-  const ENABLE_UNIFORM_EMPHASIS = true; // 把“强调/超大卡片”也压回普通宽度（更整齐）
+  const COLS = 6;
+  const ENABLE_UNIFORM_EMPHASIS = true;
+  const ENABLE_EXACT_PUBLISH_DATE = true;
 
   const STYLE_ID = 'yt-home-6cols-clean-style';
+  const HOME_ATTR = 'data-ytg-home';
+  const DATE_VIDEO_ATTR = 'data-ytg-date-video';
+  const DATE_ORIGINAL_ATTR = 'data-ytg-relative-date';
 
-  // 只在主页生效（YouTube 主页路径仅为 '/'）
+  // 页面内缓存即可：同一个视频在本次浏览中只请求一次。
+  const dateCache = new Map();
+
   const isHome = () => location.pathname === '/';
 
-  // 注入 CSS（只改变量，不改 display）
   const injectStyle = () => {
     if (document.getElementById(STYLE_ID)) return;
-    const css = `
-/* 固定主页 6 列（覆盖内部断点逻辑） */
-ytd-rich-grid-renderer {
+
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+:root[${HOME_ATTR}="1"] ytd-rich-grid-renderer {
   --ytd-rich-grid-items-per-row: ${COLS} !important;
 }
 
-/* 让卡片不要被内部 max-width/缩放约束住 */
-ytd-rich-item-renderer {
+:root[${HOME_ATTR}="1"] ytd-rich-item-renderer {
   max-width: none !important;
   transform: none !important;
   zoom: 1 !important;
 }
 
-/* 可选：把”强调/超大卡片”恢复为普通卡（避免一行只剩它一个） */
 ${ENABLE_UNIFORM_EMPHASIS ? `
-ytd-rich-item-renderer[is-emphasized],
-ytd-rich-item-renderer[lockup] {
+:root[${HOME_ATTR}="1"] ytd-rich-item-renderer[is-emphasized],
+:root[${HOME_ATTR}="1"] ytd-rich-item-renderer[lockup] {
   contain: content;
 }
 ` : ''}
 
-/* 立即隐藏已知的货架组件（CSS 能直接命中的先处理） */
-/* Shorts 行 */
-ytd-reel-shelf-renderer,
-ytd-rich-item-renderer:has(ytd-reel-shelf-renderer),
-ytd-rich-section-renderer:has(ytd-reel-shelf-renderer) {
+:root[${HOME_ATTR}="1"] ytd-reel-shelf-renderer,
+:root[${HOME_ATTR}="1"] ytd-rich-item-renderer:has(ytd-reel-shelf-renderer),
+:root[${HOME_ATTR}="1"] ytd-rich-section-renderer {
   display: none !important;
 }
-/* 全部 rich-shelf（例如“按主题推荐/分类货架”等） */
-ytd-rich-shelf-renderer,
-ytd-rich-section-renderer:has(#rich-shelf-header-container) {
-  display: none !important;
-}
-
-/* JS 标记的目标统一隐藏 */
-[data-ytg-hide="1"] { display: none !important; }
 `;
-    const s = document.createElement('style');
-    s.id = STYLE_ID;
-    s.textContent = css;
-    document.documentElement.appendChild(s);
+    document.documentElement.appendChild(style);
   };
 
-  // 通过 JS 处理语言相关的文案（例如“重大新闻”）
-  const labelsTopNews = [
-    '重大新闻', '重大新聞', 'Breaking news', 'Top news', 'Headlines'
-  ];
+  // 只认普通视频的标题链接；Mix/播放列表链接带有 list 参数，直接跳过。
+  const getVideoId = card => {
+    const link = card.querySelector(
+      'a.ytLockupMetadataViewModelTitle[href*="/watch?v="], ' +
+      'a.ytLockupViewModelTitle[href*="/watch?v="], ' +
+      'a#video-title-link[href*="/watch?v="], ' +
+      'a#video-title[href*="/watch?v="]'
+    );
+    if (!link) return '';
 
-  const markShelvesByText = (root = document) => {
-    // “重大新闻” 类分区：用多个候选选择器兜底，应对 YouTube 结构变更
-    root.querySelectorAll('ytd-rich-section-renderer').forEach(sec => {
-      const titleSelectors = [
-        '#title', '#rich-shelf-header', '#shelf-title',
-        'h2', 'yt-formatted-string', 'span#title'
-      ];
-      let title = '';
-      for (const sel of titleSelectors) {
-        const el = sec.querySelector(sel);
-        if (el?.textContent?.trim()) {
-          title = el.textContent.trim();
-          break;
-        }
-      }
-      if (title && labelsTopNews.some(t => title.includes(t))) {
-        sec.setAttribute('data-ytg-hide', '1');
-      }
-    });
-  };
-
-  // Shorts、rich-shelf 的 JS 兜底（如果后来动态插入）
-  const markKnownShelves = (root = document) => {
-    root.querySelectorAll('ytd-reel-shelf-renderer').forEach(el => {
-      (el.closest('ytd-rich-section-renderer') ||
-       el.closest('ytd-rich-item-renderer') || el).setAttribute('data-ytg-hide', '1');
-    });
-    root.querySelectorAll('ytd-rich-shelf-renderer').forEach(el => {
-      (el.closest('ytd-rich-section-renderer') || el).setAttribute('data-ytg-hide', '1');
-    });
-  };
-
-  // 应用一次（导航完成或初次加载时）
-  const applyOnce = () => {
-    if (!isHome()) return;
-    injectStyle();
-    markKnownShelves(document);
-    markShelvesByText(document);
-  };
-
-  // 观察动态变更（YouTube 是 SPA，不断往 #contents 塞东西）
-  const mo = new MutationObserver(muts => {
-    if (!isHome()) return;
-    for (const m of muts) {
-      if (m.addedNodes && m.addedNodes.length) {
-        m.addedNodes.forEach(n => {
-          if (!(n instanceof Element)) return;
-          markKnownShelves(n);
-          markShelvesByText(n);
-        });
-      }
+    try {
+      const url = new URL(link.href, location.origin);
+      if (url.searchParams.has('list')) return '';
+      const videoId = url.searchParams.get('v') || '';
+      return /^[\w-]{11}$/.test(videoId) ? videoId : '';
+    } catch {
+      return '';
     }
+  };
+
+  // 按相对时间文本找元素，不依赖它在元数据行中的位置。
+  const isRelativeTime = text => {
+    const value = text?.replace(/\u00a0/g, ' ').trim() || '';
+    return /\d[\s\S]*(?:\bago|前|\s전|назад|geleden|siden|sedan|önce|trước|yang lalu|fa)$/i.test(value) ||
+      /^(?:just now|刚刚|剛剛)$/i.test(value);
+  };
+
+  const findDateElement = card => Array.from(card.querySelectorAll(
+    'yt-content-metadata-view-model span[role="text"], ' +
+    '#metadata-line > span, #metadata-line > .inline-metadata-item'
+  )).find(el =>
+    isRelativeTime(el.textContent) ||
+    isRelativeTime(el.getAttribute('aria-label'))
+  ) || null;
+
+  const fetchPublishDate = videoId => {
+    if (dateCache.has(videoId)) return dateCache.get(videoId);
+
+    const request = (async () => {
+      try {
+        const ytcfg = globalThis.ytcfg;
+        const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY');
+        const context = ytcfg?.get?.('INNERTUBE_CONTEXT');
+        if (!apiKey || !context) return '';
+
+        const response = await fetch(
+          `/youtubei/v1/player?key=${encodeURIComponent(apiKey)}&prettyPrint=false`,
+          {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ context, videoId })
+          }
+        );
+        if (!response.ok) return '';
+
+        const data = await response.json();
+        const microformat = data?.microformat?.playerMicroformatRenderer;
+        const value = microformat?.publishDate || microformat?.uploadDate || '';
+        return value.match(/^\d{4}-\d{2}-\d{2}/)?.[0] || '';
+      } catch {
+        return '';
+      }
+    })();
+
+    dateCache.set(videoId, request);
+    return request;
+  };
+
+  const replacePublishDate = async card => {
+    const videoId = getVideoId(card);
+    const dateEl = videoId ? findDateElement(card) : null;
+    if (!videoId || !dateEl) return;
+    if (card.getAttribute(DATE_VIDEO_ATTR) === videoId) return;
+
+    // 先标记，避免同一个动态卡片被 MutationObserver 重复处理。
+    card.setAttribute(DATE_VIDEO_ATTR, videoId);
+    const exactDate = await fetchPublishDate(videoId);
+
+    // 等待期间 YouTube 可能回收并复用卡片，写回前重新确认。
+    if (!exactDate || !card.isConnected || !isHome() ||
+        getVideoId(card) !== videoId) return;
+
+    const currentDateEl = findDateElement(card);
+    if (!currentDateEl) return;
+
+    const relativeDate = currentDateEl.textContent.trim();
+    currentDateEl.setAttribute(DATE_ORIGINAL_ATTR, relativeDate);
+    currentDateEl.textContent = exactDate;
+    currentDateEl.setAttribute('aria-label', exactDate);
+    currentDateEl.setAttribute('title', relativeDate);
+  };
+
+  const dateObserver = new IntersectionObserver(entries => {
+    if (!isHome()) return;
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      dateObserver.unobserve(entry.target);
+      replacePublishDate(entry.target);
+    });
   });
 
-  // 入口（每次导航前先断开旧的观察，避免重复注册）
-  const boot = () => {
-    mo.disconnect();
-    applyOnce();
-    mo.observe(document.documentElement, { childList: true, subtree: true });
+  const observeCards = (root = document) => {
+    if (!ENABLE_EXACT_PUBLISH_DATE) return;
+
+    const cards = new Set();
+    if (root instanceof Element) {
+      const card = root.closest('ytd-rich-item-renderer');
+      if (card) cards.add(card);
+    }
+    root.querySelectorAll?.('ytd-rich-item-renderer').forEach(card => cards.add(card));
+
+    cards.forEach(card => {
+      // rich-section 已被隐藏，不为其中的货架视频请求日期。
+      if (!card.closest('ytd-rich-section-renderer')) dateObserver.observe(card);
+    });
   };
 
-  // 处理 SPA 导航
+  const restoreDates = () => {
+    document.querySelectorAll(`[${DATE_ORIGINAL_ATTR}]`).forEach(el => {
+      const original = el.getAttribute(DATE_ORIGINAL_ATTR);
+      if (original) {
+        el.textContent = original;
+        el.setAttribute('aria-label', original);
+      }
+      el.removeAttribute(DATE_ORIGINAL_ATTR);
+      el.removeAttribute('title');
+    });
+    document.querySelectorAll(`[${DATE_VIDEO_ATTR}]`).forEach(card => {
+      card.removeAttribute(DATE_VIDEO_ATTR);
+    });
+  };
+
+  const apply = () => {
+    injectStyle();
+    if (isHome()) {
+      document.documentElement.setAttribute(HOME_ATTR, '1');
+      observeCards(document);
+    } else {
+      document.documentElement.removeAttribute(HOME_ATTR);
+      dateObserver.disconnect();
+      restoreDates();
+    }
+  };
+
+  const mutationObserver = new MutationObserver(mutations => {
+    if (!isHome()) return;
+    mutations.forEach(mutation => {
+      mutation.addedNodes.forEach(node => {
+        if (node instanceof Element) observeCards(node);
+      });
+    });
+  });
+
+  const boot = () => {
+    mutationObserver.disconnect();
+    apply();
+    mutationObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+  };
+
   window.addEventListener('yt-navigate-finish', boot);
-  // 首次进入
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {
