@@ -92,7 +92,12 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
 
   const showDate = async card => {
     const id = videoIdOf(card);
-    if (!id || card.getAttribute(DONE) === id || !dateElOf(card)) return;
+    if (!id || card.getAttribute(DONE) === id) return;
+
+    // 卡片换了视频：上一个视频留下的还原记录必须作废，否则离开主页时
+    // 会用旧的相对时间覆盖新视频的文字。
+    clearDates(card, false);
+    if (!dateElOf(card)) return;
 
     card.setAttribute(DONE, id); // 先标记，避免重复请求同一张卡
     const date = await fetchDate(id);
@@ -109,15 +114,20 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     el.textContent = date;
   };
 
-  const restoreDates = () => {
-    document.querySelectorAll(`[${KEEP}]`).forEach(el => {
-      const relative = el.getAttribute(KEEP);
-      el.textContent = relative;
-      el.setAttribute('aria-label', relative);
+  // 清掉一棵子树上的改写记录；restore 为真时把原来的相对时间写回去。
+  const clearDates = (root, restore) => {
+    root.querySelectorAll(`[${KEEP}]`).forEach(el => {
+      const card = el.closest(CARD);
+      // 卡片已经换了视频时，YouTube 写的新文字才是对的，不能拿旧记录覆盖。
+      if (restore && card?.getAttribute(DONE) === videoIdOf(card)) {
+        const relative = el.getAttribute(KEEP);
+        el.textContent = relative;
+        el.setAttribute('aria-label', relative);
+      }
       el.removeAttribute('title');
       el.removeAttribute(KEEP);
     });
-    document.querySelectorAll(`[${DONE}]`).forEach(card => card.removeAttribute(DONE));
+    root.querySelectorAll(`[${DONE}]`).forEach(card => card.removeAttribute(DONE));
   };
 
   // 只给进入视口的卡片取日期。
@@ -166,21 +176,29 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     root.toggleAttribute(HOME, isHome());
     if (isHome()) return scan();
     cardsInView.disconnect();
-    restoreDates();
+    clearDates(document, true);
   };
 
   // 观察 document 而不是 <html>，这样脚本比文档更早执行时也能工作。
+  // YouTube 复用卡片时可能只改 href 和文本节点内容，所以三种变化都要看。
   new MutationObserver(records => {
     if (!style.isConnected) apply();
     for (const record of records) {
       // 卡片被就地改写时 target 落在卡片内；新插入的整块内容走 addedNodes。
-      const card = record.target.closest?.(CARD);
+      const target = record.target;
+      const el = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
+      const card = el?.closest(CARD);
       if (card) scan(card);
       record.addedNodes.forEach(node => {
         if (node.nodeType === Node.ELEMENT_NODE) scan(node);
       });
     }
-  }).observe(document, { childList: true, subtree: true });
+  }).observe(document, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributeFilter: ['href']
+  });
 
   window.addEventListener('yt-navigate-finish', apply);
   apply();
