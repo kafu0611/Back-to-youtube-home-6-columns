@@ -14,6 +14,7 @@
   const ENABLE_UNIFORM_EMPHASIS = true;
   const ENABLE_EXACT_PUBLISH_DATE = true;
 
+  const CARD = 'ytd-rich-item-renderer';
   const HOME = 'data-ytg-home';      // <html> 上的开关，CSS 只在主页生效
   const DONE = 'data-ytg-video';     // 卡片上记录已处理过的 videoId
   const KEEP = 'data-ytg-relative';  // 日期元素上保存原始的相对时间
@@ -119,24 +120,42 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
     document.querySelectorAll(`[${DONE}]`).forEach(card => card.removeAttribute(DONE));
   };
 
-  // 只给进入视口的卡片取日期；observe 可重复调用，被回收复用的卡片会重新排队。
+  // 只给进入视口的卡片取日期。
   const cardsInView = new IntersectionObserver(entries => entries.forEach(entry => {
     if (!entry.isIntersecting) return;
     cardsInView.unobserve(entry.target);
     if (isHome()) showDate(entry.target);
   }));
 
-  let scanQueued = false;
-  const scan = () => {
-    if (scanQueued || !ENABLE_EXACT_PUBLISH_DATE || !isHome()) return;
-    scanQueued = true;
-    requestAnimationFrame(() => {
-      scanQueued = false;
-      if (!isHome()) return;
+  // 只登记发生过变化的子树，避免每次 DOM 变动都重扫整页。
+  const pending = new Set();
+  let queued = false;
+
+  const flush = () => {
+    queued = false;
+    const roots = [...pending];
+    pending.clear();
+    if (!isHome()) return;
+
+    const cards = new Set();
+    for (const root of roots) {
+      if (!root.isConnected) continue; // 同一帧内又被移除的子树不必登记
+      const self = root.closest?.(CARD); // root 本身可能就在某张卡片里
+      if (self) cards.add(self);
+      root.querySelectorAll(CARD).forEach(card => cards.add(card));
+    }
+    cards.forEach(card => {
       // rich-section 已被隐藏，不为其中的货架视频请求日期。
-      document.querySelectorAll('ytd-rich-item-renderer:not(ytd-rich-section-renderer *)')
-        .forEach(card => cardsInView.observe(card));
+      if (!card.closest('ytd-rich-section-renderer')) cardsInView.observe(card);
     });
+  };
+
+  const scan = (root = document) => {
+    if (!ENABLE_EXACT_PUBLISH_DATE || !isHome()) return;
+    pending.add(root);
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(flush);
   };
 
   const apply = () => {
@@ -151,9 +170,16 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
   };
 
   // 观察 document 而不是 <html>，这样脚本比文档更早执行时也能工作。
-  new MutationObserver(() => {
+  new MutationObserver(records => {
     if (!style.isConnected) apply();
-    scan();
+    for (const record of records) {
+      // 卡片被就地改写时 target 落在卡片内；新插入的整块内容走 addedNodes。
+      const card = record.target.closest?.(CARD);
+      if (card) scan(card);
+      record.addedNodes.forEach(node => {
+        if (node.nodeType === Node.ELEMENT_NODE) scan(node);
+      });
+    }
   }).observe(document, { childList: true, subtree: true });
 
   window.addEventListener('yt-navigate-finish', apply);
