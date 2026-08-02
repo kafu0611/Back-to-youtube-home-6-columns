@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Back-to-youtube-home-6-columns
 // @namespace    yt-home-6cols-clean
-// @version      0.4
+// @version      0.5
 // @description  固定 YouTube 主页六列、隐藏插入分区，并显示视频的精确发布日期
 // @match        https://www.youtube.com/*
 // @run-at       document-start
@@ -14,215 +14,148 @@
   const ENABLE_UNIFORM_EMPHASIS = true;
   const ENABLE_EXACT_PUBLISH_DATE = true;
 
-  const STYLE_ID = 'yt-home-6cols-clean-style';
-  const HOME_ATTR = 'data-ytg-home';
-  const DATE_VIDEO_ATTR = 'data-ytg-date-video';
-  const DATE_ORIGINAL_ATTR = 'data-ytg-relative-date';
-
-  // 页面内缓存即可：同一个视频在本次浏览中只请求一次。
-  const dateCache = new Map();
+  const HOME = 'data-ytg-home';      // <html> 上的开关，CSS 只在主页生效
+  const DONE = 'data-ytg-video';     // 卡片上记录已处理过的 videoId
+  const KEEP = 'data-ytg-relative';  // 日期元素上保存原始的相对时间
 
   const isHome = () => location.pathname === '/';
 
-  const injectStyle = () => {
-    if (document.getElementById(STYLE_ID)) return;
-
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-:root[${HOME_ATTR}="1"] ytd-rich-grid-renderer {
+  // 样式在 <html> 一出现就挂上，避免先闪一次默认列数。
+  const style = document.createElement('style');
+  style.textContent = `
+:root[${HOME}] ytd-rich-grid-renderer {
   --ytd-rich-grid-items-per-row: ${COLS} !important;
 }
-
-:root[${HOME_ATTR}="1"] ytd-rich-item-renderer {
+:root[${HOME}] ytd-rich-item-renderer {
   max-width: none !important;
   transform: none !important;
   zoom: 1 !important;
 }
-
-${ENABLE_UNIFORM_EMPHASIS ? `
-:root[${HOME_ATTR}="1"] ytd-rich-item-renderer[is-emphasized],
-:root[${HOME_ATTR}="1"] ytd-rich-item-renderer[lockup] {
-  contain: content;
-}
-` : ''}
-
-:root[${HOME_ATTR}="1"] ytd-reel-shelf-renderer,
-:root[${HOME_ATTR}="1"] ytd-rich-item-renderer:has(ytd-reel-shelf-renderer),
-:root[${HOME_ATTR}="1"] ytd-rich-section-renderer {
+:root[${HOME}] ytd-reel-shelf-renderer,
+:root[${HOME}] ytd-rich-item-renderer:has(ytd-reel-shelf-renderer),
+:root[${HOME}] ytd-rich-section-renderer {
   display: none !important;
 }
+${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized],
+:root[${HOME}] ytd-rich-item-renderer[lockup] {
+  contain: content;
+}` : ''}
 `;
-    document.documentElement.appendChild(style);
-  };
 
-  // 只认普通视频的标题链接；Mix/播放列表链接带有 list 参数，直接跳过。
-  const getVideoId = card => {
-    const link = card.querySelector(
-      'a.ytLockupMetadataViewModelTitle[href*="/watch?v="], ' +
-      'a.ytLockupViewModelTitle[href*="/watch?v="], ' +
-      'a#video-title-link[href*="/watch?v="], ' +
-      'a#video-title[href*="/watch?v="]'
-    );
+  // ---- 精确发布日期 ----
+
+  const cache = new Map(); // videoId -> Promise<string>，同一次浏览只请求一次
+
+  // 卡片内第一个 /watch 链接就是这张卡的视频；Mix/播放列表带 list 参数，跳过。
+  const videoIdOf = card => {
+    const link = card.querySelector('a[href*="/watch?v="]');
     if (!link) return '';
-
-    try {
-      const url = new URL(link.href, location.origin);
-      if (url.searchParams.has('list')) return '';
-      const videoId = url.searchParams.get('v') || '';
-      return /^[\w-]{11}$/.test(videoId) ? videoId : '';
-    } catch {
-      return '';
-    }
+    const url = new URL(link.href, location.origin);
+    const id = url.searchParams.has('list') ? '' : url.searchParams.get('v');
+    return /^[\w-]{11}$/.test(id) ? id : '';
   };
 
-  // 按相对时间文本找元素，不依赖它在元数据行中的位置。
-  const isRelativeTime = text => {
-    const value = text?.replace(/\u00a0/g, ' ').trim() || '';
-    return /\d[\s\S]*(?:\bago|前|\s전|назад|geleden|siden|sedan|önce|trước|yang lalu|fa)$/i.test(value) ||
-      /^(?:just now|刚刚|剛剛)$/i.test(value);
-  };
+  // 按文本判断相对时间，不依赖它在元数据行中的位置。
+  const RELATIVE =
+    /\d[\s\S]*(?:\bago|前|\s전|назад|geleden|siden|sedan|önce|trước|yang lalu|fa)$|^(?:just now|刚刚|剛剛)$/i;
+  const looksRelative = text => RELATIVE.test((text || '').replace(/\u00a0/g, ' ').trim());
 
-  const findDateElement = card => Array.from(card.querySelectorAll(
+  const dateElOf = card => [...card.querySelectorAll(
     'yt-content-metadata-view-model span[role="text"], ' +
     '#metadata-line > span, #metadata-line > .inline-metadata-item'
-  )).find(el =>
-    isRelativeTime(el.textContent) ||
-    isRelativeTime(el.getAttribute('aria-label'))
-  ) || null;
+  )].find(el => looksRelative(el.textContent) || looksRelative(el.getAttribute('aria-label')));
 
-  const fetchPublishDate = videoId => {
-    if (dateCache.has(videoId)) return dateCache.get(videoId);
-
-    const request = (async () => {
+  // 复用页面自带的 Innertube 接口，不需要 API key，也不下载完整观看页。
+  const fetchDate = id => {
+    if (!cache.has(id)) cache.set(id, (async () => {
       try {
-        const ytcfg = globalThis.ytcfg;
-        const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY');
-        const context = ytcfg?.get?.('INNERTUBE_CONTEXT');
-        if (!apiKey || !context) return '';
+        const key = globalThis.ytcfg?.get?.('INNERTUBE_API_KEY');
+        const context = globalThis.ytcfg?.get?.('INNERTUBE_CONTEXT');
+        if (!key || !context) return '';
 
-        const response = await fetch(
-          `/youtubei/v1/player?key=${encodeURIComponent(apiKey)}&prettyPrint=false`,
-          {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ context, videoId })
-          }
-        );
-        if (!response.ok) return '';
-
-        const data = await response.json();
-        const microformat = data?.microformat?.playerMicroformatRenderer;
-        const value = microformat?.publishDate || microformat?.uploadDate || '';
+        const res = await fetch(`/youtubei/v1/player?key=${encodeURIComponent(key)}&prettyPrint=false`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context, videoId: id })
+        });
+        const micro = (await res.json())?.microformat?.playerMicroformatRenderer;
+        const value = micro?.publishDate || micro?.uploadDate || '';
         return value.match(/^\d{4}-\d{2}-\d{2}/)?.[0] || '';
       } catch {
         return '';
       }
-    })();
-
-    dateCache.set(videoId, request);
-    return request;
+    })());
+    return cache.get(id);
   };
 
-  const replacePublishDate = async card => {
-    const videoId = getVideoId(card);
-    const dateEl = videoId ? findDateElement(card) : null;
-    if (!videoId || !dateEl) return;
-    if (card.getAttribute(DATE_VIDEO_ATTR) === videoId) return;
+  const showDate = async card => {
+    const id = videoIdOf(card);
+    if (!id || card.getAttribute(DONE) === id || !dateElOf(card)) return;
 
-    // 先标记，避免同一个动态卡片被 MutationObserver 重复处理。
-    card.setAttribute(DATE_VIDEO_ATTR, videoId);
-    const exactDate = await fetchPublishDate(videoId);
+    card.setAttribute(DONE, id); // 先标记，避免重复请求同一张卡
+    const date = await fetchDate(id);
 
     // 等待期间 YouTube 可能回收并复用卡片，写回前重新确认。
-    if (!exactDate || !card.isConnected || !isHome() ||
-        getVideoId(card) !== videoId) return;
+    if (!date || !card.isConnected || !isHome() || videoIdOf(card) !== id) return;
+    const el = dateElOf(card);
+    if (!el) return;
 
-    const currentDateEl = findDateElement(card);
-    if (!currentDateEl) return;
-
-    const relativeDate = currentDateEl.textContent.trim();
-    currentDateEl.setAttribute(DATE_ORIGINAL_ATTR, relativeDate);
-    currentDateEl.textContent = exactDate;
-    currentDateEl.setAttribute('aria-label', exactDate);
-    currentDateEl.setAttribute('title', relativeDate);
-  };
-
-  const dateObserver = new IntersectionObserver(entries => {
-    if (!isHome()) return;
-    entries.forEach(entry => {
-      if (!entry.isIntersecting) return;
-      dateObserver.unobserve(entry.target);
-      replacePublishDate(entry.target);
-    });
-  });
-
-  const observeCards = (root = document) => {
-    if (!ENABLE_EXACT_PUBLISH_DATE) return;
-
-    const cards = new Set();
-    if (root instanceof Element) {
-      const card = root.closest('ytd-rich-item-renderer');
-      if (card) cards.add(card);
-    }
-    root.querySelectorAll?.('ytd-rich-item-renderer').forEach(card => cards.add(card));
-
-    cards.forEach(card => {
-      // rich-section 已被隐藏，不为其中的货架视频请求日期。
-      if (!card.closest('ytd-rich-section-renderer')) dateObserver.observe(card);
-    });
+    const relative = el.textContent.trim();
+    el.setAttribute(KEEP, relative);
+    el.setAttribute('title', relative);
+    el.setAttribute('aria-label', date);
+    el.textContent = date;
   };
 
   const restoreDates = () => {
-    document.querySelectorAll(`[${DATE_ORIGINAL_ATTR}]`).forEach(el => {
-      const original = el.getAttribute(DATE_ORIGINAL_ATTR);
-      if (original) {
-        el.textContent = original;
-        el.setAttribute('aria-label', original);
-      }
-      el.removeAttribute(DATE_ORIGINAL_ATTR);
+    document.querySelectorAll(`[${KEEP}]`).forEach(el => {
+      const relative = el.getAttribute(KEEP);
+      el.textContent = relative;
+      el.setAttribute('aria-label', relative);
       el.removeAttribute('title');
+      el.removeAttribute(KEEP);
     });
-    document.querySelectorAll(`[${DATE_VIDEO_ATTR}]`).forEach(card => {
-      card.removeAttribute(DATE_VIDEO_ATTR);
+    document.querySelectorAll(`[${DONE}]`).forEach(card => card.removeAttribute(DONE));
+  };
+
+  // 只给进入视口的卡片取日期；observe 可重复调用，被回收复用的卡片会重新排队。
+  const cardsInView = new IntersectionObserver(entries => entries.forEach(entry => {
+    if (!entry.isIntersecting) return;
+    cardsInView.unobserve(entry.target);
+    if (isHome()) showDate(entry.target);
+  }));
+
+  let scanQueued = false;
+  const scan = () => {
+    if (scanQueued || !ENABLE_EXACT_PUBLISH_DATE || !isHome()) return;
+    scanQueued = true;
+    requestAnimationFrame(() => {
+      scanQueued = false;
+      if (!isHome()) return;
+      // rich-section 已被隐藏，不为其中的货架视频请求日期。
+      document.querySelectorAll('ytd-rich-item-renderer:not(ytd-rich-section-renderer *)')
+        .forEach(card => cardsInView.observe(card));
     });
   };
 
   const apply = () => {
-    injectStyle();
-    if (isHome()) {
-      document.documentElement.setAttribute(HOME_ATTR, '1');
-      observeCards(document);
-    } else {
-      document.documentElement.removeAttribute(HOME_ATTR);
-      dateObserver.disconnect();
-      restoreDates();
-    }
+    const root = document.documentElement;
+    if (!root) return; // document-start 时 <html> 可能还没建好
+    if (!style.isConnected) root.append(style);
+
+    root.toggleAttribute(HOME, isHome());
+    if (isHome()) return scan();
+    cardsInView.disconnect();
+    restoreDates();
   };
 
-  const mutationObserver = new MutationObserver(mutations => {
-    if (!isHome()) return;
-    mutations.forEach(mutation => {
-      mutation.addedNodes.forEach(node => {
-        if (node instanceof Element) observeCards(node);
-      });
-    });
-  });
+  // 观察 document 而不是 <html>，这样脚本比文档更早执行时也能工作。
+  new MutationObserver(() => {
+    if (!style.isConnected) apply();
+    scan();
+  }).observe(document, { childList: true, subtree: true });
 
-  const boot = () => {
-    mutationObserver.disconnect();
-    apply();
-    mutationObserver.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
-  };
-
-  window.addEventListener('yt-navigate-finish', boot);
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
+  window.addEventListener('yt-navigate-finish', apply);
+  apply();
 })();
