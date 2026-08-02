@@ -92,12 +92,14 @@ ${ENABLE_UNIFORM_EMPHASIS ? `:root[${HOME}] ytd-rich-item-renderer[is-emphasized
 
   const showDate = async card => {
     const id = videoIdOf(card);
-    if (!id || card.getAttribute(DONE) === id) return;
+    if ((card.getAttribute(DONE) || '') === id) return; // 还是同一个视频
 
-    // 卡片换了视频：上一个视频留下的还原记录必须作废，否则离开主页时
-    // 会用旧的相对时间覆盖新视频的文字。
+    // 卡片换了内容就先把旧记录全部作废，包括换成 Mix、直播这类不处理的卡片：
+    // 留着旧标记会让这张卡以后再显示同一个视频时被当成已处理，
+    // 留着旧的还原信息则会在离开主页时覆盖新视频的文字。
+    card.removeAttribute(DONE); // querySelectorAll 不含 root 自身，得单独删
     clearDates(card, false);
-    if (!dateElOf(card)) return;
+    if (!id || !dateElOf(card)) return;
 
     card.setAttribute(DONE, id); // 先标记，避免重复请求同一张卡
     const date = await fetchDate(id);
